@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Global Clinical Monitoring Hub</title>
+  <!-- MQTT over WebSockets Library -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/mqtt/4.3.7/mqtt.min.js"></script>
+  <!-- Chart.js for beautiful historical plotting -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    body {
+      font-family: 'Segoe UI', Arial, sans-serif;
+      background: #090d16;
+      margin: 0;
+      padding: 20px;
+      color: #f1f5f9;
+      text-align: center;
+    }
+    .header {
+      padding: 10px 0;
+      border-bottom: 1px solid #1e293b;
+      margin-bottom: 20px;
+    }
+    h1 { margin: 0; font-size: 26px; color: #38bdf8; }
+    .card {
+      background: #111827;
+      border-radius: 16px;
+      max-width: 500px;
+      padding: 25px;
+      margin: 0 auto 20px auto;
+      border: 1px solid #1f2937;
+      box-sizing: border-box;
+      transition: all 0.3s ease;
+    }
+    .card.alarm {
+      border-color: #ef4444;
+      background: linear-gradient(135deg, #111827 0%, #450a0a 100%);
+      animation: flash 1.5s infinite;
+    }
+    @keyframes flash {
+      0%, 100% { border-color: #ef4444; box-shadow: 0 0 10px rgba(239, 68, 68, 0.2); }
+      50% { border-color: #7f1d1d; box-shadow: 0 0 20px rgba(239, 68, 68, 0.5); }
+    }
+    .pulse { font-size: 72px; font-weight: 800; color: #38bdf8; margin: 15px 0; }
+    .card.alarm .pulse { color: #ef4444; }
+    .status {
+      font-weight: 600;
+      margin-bottom: 15px;
+      font-size: 13px;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+    }
+    .normal { color: #10b981; }
+    .danger { color: #f87171; }
+    .chart-box {
+      background: #030712;
+      border-radius: 8px;
+      border: 1px solid #1f2937;
+      margin-bottom: 20px;
+      padding: 10px;
+      height: 200px;
+    }
+    .btn {
+      display: block;
+      width: 100%;
+      background: #0284c7;
+      color: white;
+      border: none;
+      padding: 14px;
+      font-size: 16px;
+      border-radius: 8px;
+      font-weight: 600;
+      cursor: pointer;
+      box-sizing: border-box;
+      transition: background 0.2s;
+    }
+    .btn:hover { background: #0369a1; }
+    .btn.alarm-btn { background: #dc2626; }
+    .btn.alarm-btn:hover { background: #b91c1c; }
+    .broker-status {
+      font-size: 12px;
+      color: #64748b;
+      margin-top: 10px;
+    }
+  </style>
+</head>
+<body>
+
+  <div class="header">
+    <h1>Global Cloud Monitoring Hub</h1>
+  </div>
+
+  <div id="mainCard" class="card">
+    <h2>PATIENT STATION 01</h2>
+    <div class="status"><span id="statusBadge" class="normal">🟢 SYSTEM LIVE</span></div>
+    <div class="pulse"><span id="bpmVal">--</span> <span style="font-size:20px; color:#4b5563;">BPM</span></div>
+    
+    <div class="chart-box">
+      <canvas id="bpmChart"></canvas>
+    </div>
+    
+    <button id="actionBtn" class="btn" onclick="toggleEmergency()">Trigger Emergency SOS</button>
+    <div id="brokerStatus" class="broker-status">Connecting to HiveMQ Cloud...</div>
+  </div>
+
+  <script>
+    // --- HIVEMQ CLOUD CONFIGURATION ---
+    const host = 'fb50616bcf8d4d13ba72d1d5fb7acec7.s1.eu.hivemq.cloud'; 
+    const port = 8884; // Secure WebSocket Port from your setup
+    const username = 'ESP_32_Rithy'; 
+    const password = '123456789'; 
+    
+    const topicPublishButton = 'IoT/Management/Emergency button';
+    const topicSubscribePulse = 'IoT/Management/Heart Pulse';
+
+    let isAlertActive = false;
+
+    // --- INITIALIZE CHART.JS ---
+    const ctx = document.getElementById('bpmChart').getContext('2d');
+    const chartData = {
+      labels: [],
+      datasets: [{
+        label: 'Heart Rate (BPM)',
+        data: [],
+        borderColor: '#06b6d4',
+        backgroundColor: 'rgba(6, 182, 212, 0.1)',
+        borderWidth: 3,
+        tension: 0.3,
+        fill: true
+      }]
+    };
+
+    const bpmChart = new Chart(ctx, {
+      type: 'line',
+      data: chartData,
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        scales: {
+          x: { grid: { color: '#1f2937' }, ticks: { color: '#64748b' } },
+          y: { min: 0, max: 200, grid: { color: '#1f2937' }, ticks: { color: '#64748b' } }
+        },
+        plugins: { legend: { display: false } }
+      }
+    });
+
+    // --- CONNECT TO HIVEMQ OVER SECURE WEBSOCKETS ---
+    const connectUrl = `wss://${host}:${port}/mqtt`;
+    const options = {
+      clientId: 'Vercel_Dashboard_' + Math.random().toString(16).substr(2, 8),
+      username: username,
+      password: password,
+      clean: true
+    };
+
+    console.log("Connecting to HiveMQ cloud via WebSockets...");
+    const client = mqtt.connect(connectUrl, options);
+
+    client.on('connect', () => {
+      document.getElementById('brokerStatus').innerText = "Connected to HiveMQ Cloud";
+      document.getElementById('brokerStatus').style.color = "#10b981";
+      // Subscribe to the telemetry signals published by your ESP32 every 30s
+      client.subscribe(topicSubscribePulse);
+      // Also subscribe to the button topic to sync UI state if reset locally
+      client.subscribe(topicPublishButton);
+    });
+
+    client.on('error', (err) => {
+      console.error('Connection error: ', err);
+      document.getElementById('brokerStatus').innerText = "Connection failed!";
+      document.getElementById('brokerStatus').style.color = "#ef4444";
+    });
+
+    // --- HANDLE INCOMING MESSAGES FROM CLOUD ---
+    client.on('message', (topic, message) => {
+      const msgStr = message.toString();
+      console.log(`Received from [${topic}]: ${msgStr}`);
+
+      if (topic === topicSubscribePulse) {
+        try {
+          const data = JSON.parse(msgStr);
+          
+          // Update current BPM readout
+          document.getElementById('bpmVal').innerText = data.bpm > 0 ? data.bpm : '--';
+          
+          // Add data point to historical graph
+          const now = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+          
+          // Shift out oldest data point once 15 entries are loaded
+          if (chartData.labels.length >= 15) {
+            chartData.labels.shift();
+            chartData.datasets[0].data.shift();
+          }
+          
+          chartData.labels.push(now);
+          chartData.datasets[0].data.push(data.bpm);
+          bpmChart.update();
+
+          // Sync alert UI status if specified in telemetry object
+          updateAlertUI(data.alert);
+        } catch(e) {
+          console.error("Failed to parse telemetry JSON structure", e);
+        }
+      }
+
+      if (topic === topicPublishButton) {
+        if (msgStr === "ON" || msgStr === "true") updateAlertUI(true);
+        if (msgStr === "OFF" || msgStr === "false") updateAlertUI(false);
+      }
+    });
+
+    // --- UI VIEW UPDATE HELPER ---
+    function updateAlertUI(active) {
+      isAlertActive = active;
+      const mainCard = document.getElementById('mainCard');
+      const statusBadge = document.getElementById('statusBadge');
+      const actionBtn = document.getElementById('actionBtn');
+
+      if (active) {
+        mainCard.className = 'card alarm';
+        statusBadge.className = 'danger';
+        statusBadge.innerText = '⚠️ EMERGENCY SOS ACTIVE';
+        actionBtn.className = 'btn alarm-btn';
+        actionBtn.innerText = 'Cancel Emergency Alert';
+        chartData.datasets[0].borderColor = '#ef4444';
+      } else {
+        mainCard.className = 'card';
+        statusBadge.className = 'normal';
+        statusBadge.innerText = '🟢 SYSTEM LIVE';
+        actionBtn.className = 'btn';
+        actionBtn.innerText = 'Trigger Emergency SOS';
+        chartData.datasets[0].borderColor = '#06b6d4';
+      }
+    }
+
+    // --- INTERNET TRIGGER ACTION TO CONTROL THE LOCAL ESP32 ---
+    function toggleEmergency() {
+      const targetState = !isAlertActive;
+      const payload = targetState ? "ON" : "OFF";
+      
+      // Publish command straight through HiveMQ Cloud to your board
+      client.publish(topicPublishButton, payload, { qos: 1, retain: true });
+      updateAlertUI(targetState);
+    }
+  </script>
+</body>
+</html>
